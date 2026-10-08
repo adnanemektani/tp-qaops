@@ -1,0 +1,5 @@
+requests>=2.31
+pytest>=8.0
+allure-pytest>=2.13
+pytest-html>=4.1
+jsonschema>=4.21

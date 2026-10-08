@@ -1,0 +1,4 @@
+<script>alert('xss1')</script>
+"><img src=x onerror=alert('xss2')>
+'><svg/onload=alert('xss3')>
+javascript:alert(1)

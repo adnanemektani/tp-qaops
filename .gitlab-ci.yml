@@ -1,0 +1,87 @@
+# Pipeline QAOps : API (Newman) -> UI (Selenium) -> Performance (JMeter) -> Sécurité (ZAP) -> Notification
+# Variables à définir dans GitLab > Settings > CI/CD > Variables :
+#   REQRES_API_KEY (masked)   clé gratuite https://app.reqres.in
+#   NOTIFY_WEBHOOK_URL        (optionnel) webhook Slack/Discord pour la notification
+stages: [api, ui, performance, security, notify]
+
+variables:
+  FORMY_URL: "https://formy-project.herokuapp.com"
+  INTERNET_URL: "https://the-internet.herokuapp.com"
+  REQRES_BASE_URL: "https://reqres.in/api"
+
+api_tests_newman:
+  stage: api
+  image: node:20
+  script:
+    - npm install -g newman newman-reporter-htmlextra
+    - mkdir -p reports/api
+    - >
+      newman run postman/Reqres_API.postman_collection.json
+      --env-var baseUrl=$REQRES_BASE_URL --env-var apiKey=$REQRES_API_KEY
+      --reporters cli,junit,htmlextra
+      --reporter-junit-export reports/api/newman-junit.xml
+      --reporter-htmlextra-export reports/api/newman-report.html
+  artifacts:
+    when: always
+    paths: [reports/api/]
+    reports:
+      junit: reports/api/newman-junit.xml
+
+ui_tests_selenium:
+  stage: ui
+  image: python:3.12-slim
+  variables:
+    CHROME_BIN: /usr/bin/chromium
+    HEADLESS: "1"
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq chromium chromium-driver
+    - pip install -q -r ui-tests/requirements.txt
+  script:
+    - cd ui-tests && pytest --junitxml=../reports/ui/junit.xml
+  artifacts:
+    when: always
+    paths: [reports/ui/]
+    reports:
+      junit: reports/ui/junit.xml
+
+performance_jmeter:
+  stage: performance
+  image:
+    name: justb4/jmeter:5.5
+    entrypoint: [""]
+  script:
+    - mkdir -p reports/performance
+    - >
+      jmeter -n -t performance/reqres_load_test.jmx
+      -Jusers=50 -Jramp=10 -Jloops=5 -Japikey=$REQRES_API_KEY
+      -l reports/performance/results.jtl -e -o reports/performance/html-report
+  artifacts:
+    when: always
+    paths: [reports/performance/]
+  allow_failure: true   # le service Reqres peut limiter le débit (429)
+
+security_zap:
+  stage: security
+  image:
+    name: ghcr.io/zaproxy/zaproxy:stable
+    entrypoint: [""]
+  script:
+    - mkdir -p /zap/wrk reports/security
+    - zap-baseline.py -t $FORMY_URL -r zap_report.html -J zap_report.json -I || true
+    - cp /zap/wrk/zap_report.* reports/security/
+  artifacts:
+    when: always
+    paths: [reports/security/]
+
+notify:
+  stage: notify
+  image: curlimages/curl:latest
+  when: always
+  script:
+    - |
+      if [ -n "$NOTIFY_WEBHOOK_URL" ]; then
+        curl -s -X POST -H 'Content-Type: application/json' \
+          -d "{\"text\":\"Pipeline QAOps #$CI_PIPELINE_ID ($CI_COMMIT_REF_NAME) terminé : $CI_PIPELINE_URL\"}" "$NOTIFY_WEBHOOK_URL"
+      else
+        echo "NOTIFY_WEBHOOK_URL non défini : notification par e-mail GitLab uniquement."
+      fi
