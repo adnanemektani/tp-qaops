@@ -1,0 +1,102 @@
+name: QAOps CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FORMY_URL: https://formy-project.herokuapp.com
+  INTERNET_URL: https://the-internet.herokuapp.com
+  REQRES_BASE_URL: https://reqres.in/api
+  REQRES_API_KEY: ${{ secrets.REQRES_API_KEY }}
+
+jobs:
+  api-tests:
+    name: Tests API (Newman + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Newman
+        run: |
+          npm install -g newman newman-reporter-htmlextra
+          mkdir -p reports/api
+          newman run postman/Reqres_API.postman_collection.json \
+            --env-var baseUrl=$REQRES_BASE_URL --env-var apiKey=$REQRES_API_KEY \
+            --reporters cli,junit,htmlextra \
+            --reporter-junit-export reports/api/newman-junit.xml \
+            --reporter-htmlextra-export reports/api/newman-report.html
+      - name: pytest API
+        run: |
+          pip install -q -r api-tests/requirements.txt
+          cd api-tests && pytest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: rapports-api, path: reports/api/ }
+
+  ui-tests:
+    name: Tests UI (Selenium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Selenium + pytest
+        env: { HEADLESS: "1" }
+        run: |
+          pip install -q -r ui-tests/requirements.txt
+          cd ui-tests && pytest --junitxml=../reports/ui/junit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: rapports-ui, path: reports/ui/ }
+
+  performance:
+    name: Performance (JMeter)
+    runs-on: ubuntu-latest
+    needs: [api-tests]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: JMeter 50 utilisateurs
+        run: |
+          mkdir -p reports/performance
+          docker run --rm -v "$PWD":/work -w /work justb4/jmeter:5.5 \
+            -n -t performance/reqres_load_test.jmx \
+            -Jusers=50 -Jramp=10 -Jloops=5 -Japikey=$REQRES_API_KEY \
+            -l reports/performance/results.jtl -e -o reports/performance/html-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: rapports-performance, path: reports/performance/ }
+
+  security:
+    name: Sécurité (OWASP ZAP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan baseline ZAP
+        run: bash ./security/run_zap.sh $FORMY_URL || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: rapports-securite, path: reports/security/ }
+
+  notify:
+    name: Notification
+    runs-on: ubuntu-latest
+    needs: [api-tests, ui-tests, performance, security]
+    if: always()
+    steps:
+      - name: Webhook (optionnel)
+        env:
+          WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$WEBHOOK" ]; then
+            curl -s -X POST -H 'Content-Type: application/json' \
+              -d "{\"text\":\"QAOps CI #${{ github.run_number }} (${{ github.ref_name }}) termine : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "$WEBHOOK"
+          else
+            echo "Pas de webhook : notification par e-mail GitHub uniquement."
+          fi
